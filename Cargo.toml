@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.80"
 description = "A Postgres-backed job queue with heartbeat-based job claims and crash recovery"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/noah/tokio-pgqueue"
+repository = "https://github.com/noahbclarkson/tokio-pgqueue"
 keywords = ["postgres", "queue", "job", "async", "tokio"]
 categories = ["asynchronous", "database"]
 
