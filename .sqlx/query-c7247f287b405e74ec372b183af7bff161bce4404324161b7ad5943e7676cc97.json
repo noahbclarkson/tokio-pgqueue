@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE job_queue\n            SET\n                status = 'completed',\n                completed_at = $1,\n                worker_id = NULL\n            WHERE id = $2 AND worker_id = $3 AND status = 'running'\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c7247f287b405e74ec372b183af7bff161bce4404324161b7ad5943e7676cc97"
+}

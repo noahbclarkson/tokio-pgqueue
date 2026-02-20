@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        UPDATE job_queue\n                        SET\n                            status = 'pending',\n                            attempts = $1,\n                            scheduled_at = $2,\n                            started_at = NULL,\n                            last_heartbeat_at = NULL,\n                            worker_id = NULL,\n                            error_message = $3\n                        WHERE id = $4\n                        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Timestamptz",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2444132edd5b669c6358a4c07340b9567674c54dde046ae6fc1974de13397ab9"
+}

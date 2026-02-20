@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE job_queue\n            SET last_heartbeat_at = $1\n            WHERE id = $2 AND worker_id = $3 AND status = 'running'\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ca7b17f6c1061f025044ea143ac9fb609dd56248b9a4b4e4598b605e001eb235"
+}

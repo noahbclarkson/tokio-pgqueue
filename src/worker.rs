@@ -1,7 +1,11 @@
-use crate::{Job, JobId, PgQueue, QueueConfig, Result};
-use std::time::Duration;
+use crate::{Job, PgQueue, Result};
+use std::{pin::Pin, sync::Arc, time::Duration};
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{error, info};
+
+/// Type alias for a boxed async handler function.
+pub type HandlerFn =
+    Arc<dyn Fn(Job) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> + Send + Sync>;
 
 /// A worker that continuously claims and processes jobs from a queue.
 ///
@@ -11,8 +15,10 @@ use tracing::{error, info, warn};
 /// use tokio_pgqueue::{QueueWorker, WorkerBuilder};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let queue = unimplemented!();
 /// let worker = WorkerBuilder::new("my_queue", "worker-1")
-///     .handler(|job| async move {
+///     .queue(queue)
+///     .handler_fn(|job| async move {
 ///         println!("Processing job: {:?}", job);
 ///         Ok(())
 ///     })
@@ -26,7 +32,7 @@ pub struct QueueWorker {
     queue: PgQueue,
     queue_name: String,
     worker_id: String,
-    handler: Box<dyn HandlerFn>,
+    handler: HandlerFn,
     config: WorkerConfig,
 }
 
@@ -54,29 +60,12 @@ impl Default for WorkerConfig {
     }
 }
 
-/// Trait for job handler functions.
-pub trait HandlerFn: Send + Sync {
-    /// Process a job, returning a result.
-    async fn handle(&self, job: Job) -> Result<()>;
-}
-
-// Implement HandlerFn for async functions
-impl<F, Fut> HandlerFn for F
-where
-    F: Fn(Job) -> Fut + Send + Sync,
-    Fut: std::future::Future<Output = Result<()>> + Send,
-{
-    async fn handle(&self, job: Job) -> Result<()> {
-        (self)(job).await
-    }
-}
-
 /// Builder for creating a QueueWorker.
 pub struct WorkerBuilder {
     queue_name: String,
     worker_id: String,
     config: WorkerConfig,
-    handler: Option<Box<dyn HandlerFn>>,
+    handler: Option<HandlerFn>,
     queue: Option<PgQueue>,
 }
 
@@ -127,25 +116,37 @@ impl WorkerBuilder {
         self
     }
 
-    /// Set the job handler function.
-    pub fn handler<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(Job) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.handler = Some(Box::new(move |job| handler(job)));
-        self
-    }
-
-    /// Alternative handler that accepts an async function directly.
-    pub fn handler_simple<F, Fut>(mut self, handler: F) -> Self
+    /// Set the job handler using an async closure or function.
+    ///
+    /// The handler receives a [`Job`] and must return a future resolving to `Result<()>`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use tokio_pgqueue::WorkerBuilder;
+    /// WorkerBuilder::new("my_queue", "worker-1")
+    ///     .handler_fn(|job| async move {
+    ///         println!("Processing: {:?}", job.job_type);
+    ///         Ok(())
+    ///     });
+    /// ```
+    pub fn handler_fn<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(Job) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
-        self.handler = Some(Box::new(handler));
+        self.handler = Some(Arc::new(move |job| {
+            Box::pin(f(job)) as Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        }));
+        self
+    }
+
+    /// Set the job handler using a pre-boxed function pointer.
+    ///
+    /// Use [`handler_fn`] for most cases. This variant accepts the raw [`HandlerFn`] arc
+    /// for sharing a handler across multiple workers.
+    pub fn handler(mut self, handler: HandlerFn) -> Self {
+        self.handler = Some(handler);
         self
     }
 
@@ -153,7 +154,7 @@ impl WorkerBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if no handler was set.
+    /// Returns an error if no handler or queue was set.
     pub fn build(self) -> Result<QueueWorker> {
         let handler = self
             .handler
@@ -209,7 +210,7 @@ impl QueueWorker {
                     });
 
                     // Process the job
-                    let result = self.handler.handle(job.clone()).await;
+                    let result = (self.handler)(job.clone()).await;
 
                     // Abort heartbeat task
                     heartbeat_handle.abort();
@@ -225,7 +226,7 @@ impl QueueWorker {
                             error!("Job {} failed: {:?}", job.id, e);
                             if let Err(err) = self
                                 .queue
-                                .fail(job.id, &self.worker_id, &format!("{:?}", e))
+                                .fail(job.id, &self.worker_id, &format!("{e:?}"))
                                 .await
                             {
                                 error!("Failed to mark job {} as failed: {:?}", job.id, err);

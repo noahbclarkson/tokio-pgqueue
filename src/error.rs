@@ -7,11 +7,17 @@ pub enum QueueError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    #[error("Migration error: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
+
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
     #[error("Job not found: {0}")]
     JobNotFound(uuid::Uuid),
+
+    #[error("Dead letter job not found: {0}")]
+    DlqJobNotFound(uuid::Uuid),
 
     #[error("Job ownership verification failed for job {job_id} (claimed by {claimed_by}, worker is {worker_id})")]
     OwnershipViolation {

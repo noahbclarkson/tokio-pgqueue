@@ -5,45 +5,39 @@
 //
 // Example:
 //   export DATABASE_URL="postgres://postgres:password@localhost/tokio_pgqueue_test"
-//   cargo test
+//   cargo test -- --ignored
 
 use sqlx::PgPool;
-use tokio_pgqueue::{Job, JobStatus, PgQueue, QueueConfig, QueueWorker, WorkerBuilder};
-use uuid::Uuid;
+use tokio_pgqueue::{JobStatus, PgQueue, QueueConfig, WorkerBuilder};
 
 // Helper to get a test database URL
 fn test_db_url() -> String {
-    std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://postgres:postgres@localhost/tokio_pgqueue_test".to_string()
-    })
+    std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/tokio_pgqueue_test".to_string())
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_create_queue() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
     let queue = PgQueue::new(pool, config).await?;
-
-    // Clean up any existing tables
-    sqlx::query("DROP TABLE IF EXISTS job_queue CASCADE")
-        .execute(queue.pool())
-        .await?;
-
-    // Recreate queue to test migrations
-    let queue = PgQueue::new(queue.pool().clone(), config).await?;
 
     assert_eq!(queue.config().heartbeat_timeout.as_secs(), 300);
     Ok(())
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_enqueue_and_get_job() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
     let queue = PgQueue::new(pool, config).await?;
 
     let payload = serde_json::json!({"test": "data"});
-    let job_id = queue.enqueue("test_queue", "test_job", payload.clone()).await?;
+    let job_id = queue
+        .enqueue("test_queue", "test_job", payload.clone())
+        .await?;
 
     let job = queue.get_job(job_id).await?.unwrap();
 
@@ -59,6 +53,7 @@ async fn test_enqueue_and_get_job() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_claim_and_complete_job() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
@@ -66,7 +61,11 @@ async fn test_claim_and_complete_job() -> Result<(), Box<dyn std::error::Error>>
 
     // Enqueue a job
     let job_id = queue
-        .enqueue("test_queue", "test_job", serde_json::json!({"test": "data"}))
+        .enqueue(
+            "test_queue",
+            "test_job",
+            serde_json::json!({"test": "data"}),
+        )
         .await?;
 
     // Claim the job
@@ -91,6 +90,7 @@ async fn test_claim_and_complete_job() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_heartbeat() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
@@ -116,10 +116,11 @@ async fn test_heartbeat() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_fail_and_retry() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
-    let queue = PgPool::new(pool, config).await?;
+    let queue = PgQueue::new(pool, config).await?;
 
     // Enqueue and claim a job
     let job_id = queue
@@ -143,33 +144,33 @@ async fn test_fail_and_retry() -> Result<(), Box<dyn std::error::Error>> {
 
     // Claim again and fail a second time
     queue.claim("test_queue", "worker-1").await?;
-    queue
-        .fail(job_id, "worker-1", "Failed again")
-        .await?;
+    queue.fail(job_id, "worker-1", "Failed again").await?;
 
     let job = queue.get_job(job_id).await?.unwrap();
     assert_eq!(job.status, JobStatus::Pending);
     assert_eq!(job.attempts, 2);
 
-    // Claim a third time and fail - should be permanently failed (max_attempts = 3)
+    // Claim a third time and fail - should move to DLQ (max_attempts = 3)
     queue.claim("test_queue", "worker-1").await?;
-    queue
-        .fail(job_id, "worker-1", "Final failure")
-        .await?;
+    queue.fail(job_id, "worker-1", "Final failure").await?;
 
-    let job = queue.get_job(job_id).await?.unwrap();
-    assert_eq!(job.status, JobStatus::Failed);
-    assert_eq!(job.attempts, 3);
-    assert!(job.completed_at.is_some());
+    // Job should no longer exist in main queue (moved to DLQ)
+    let job = queue.get_job(job_id).await?;
+    assert!(job.is_none(), "Job should have been moved to DLQ");
+
+    // Verify it's in the DLQ
+    let dlq_count = queue.dlq_count("test_queue").await?;
+    assert!(dlq_count > 0, "DLQ should have at least one job");
 
     Ok(())
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_reclaim_orphans() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
-    let queue = PgPool::new(pool, config).await?;
+    let queue = PgQueue::new(pool, config).await?;
 
     // Enqueue and claim a job
     let job_id = queue
@@ -177,11 +178,11 @@ async fn test_reclaim_orphans() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     queue.claim("test_queue", "worker-1").await?;
 
-    // Manually update last_heartbeat_at to make it look orphaned
-    sqlx::query!(
+    // Manually update last_heartbeat_at to make it look orphaned (using dynamic query)
+    sqlx::query(
         "UPDATE job_queue SET last_heartbeat_at = NOW() - INTERVAL '10 minutes' WHERE id = $1",
-        job_id
     )
+    .bind(job_id)
     .execute(queue.pool())
     .await?;
 
@@ -203,10 +204,11 @@ async fn test_reclaim_orphans() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_queue_isolation() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
-    let queue = PgPool::new(pool, config).await?;
+    let queue = PgQueue::new(pool, config).await?;
 
     // Enqueue jobs in different queues
     let job1 = queue
@@ -228,10 +230,11 @@ async fn test_queue_isolation() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_ownership_violation() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
-    let queue = PgPool::new(pool, config).await?;
+    let queue = PgQueue::new(pool, config).await?;
 
     // Enqueue and claim a job with worker-1
     let job_id = queue
@@ -254,10 +257,11 @@ async fn test_ownership_violation() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_worker_basic() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
-    let queue = PgPool::new(pool, config).await?;
+    let queue = PgQueue::new(pool, config).await?;
 
     // Enqueue a job
     let job_id = queue
@@ -274,7 +278,7 @@ async fn test_worker_basic() -> Result<(), Box<dyn std::error::Error>> {
     let worker = WorkerBuilder::new("worker_test", "test-worker")
         .queue(queue.clone())
         .poll_interval(std::time::Duration::from_millis(100))
-        .handler_simple(move |job| {
+        .handler_fn(move |job| {
             let processed = processed_clone.clone();
             async move {
                 assert_eq!(job.id, job_id);
@@ -303,10 +307,11 @@ async fn test_worker_basic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[ignore = "requires postgres"]
 async fn test_skip_locked() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
     let config = QueueConfig::default();
-    let queue = PgPool::new(pool, config).await?;
+    let queue = PgQueue::new(pool, config).await?;
 
     // Enqueue 3 jobs
     let job1 = queue
@@ -331,6 +336,102 @@ async fn test_skip_locked() -> Result<(), Box<dyn std::error::Error>> {
     // Worker 1 cannot complete worker 2's job
     let result = queue.complete(claimed2.id, "worker-1").await;
     assert!(result.is_err());
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_priority_ordering() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    let config = QueueConfig::default();
+    let queue = PgQueue::new(pool, config).await?;
+
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Enqueue low priority job first
+    let low_priority = queue
+        .enqueue_with_options(
+            "priority_test",
+            "job",
+            serde_json::json!({"priority": "low"}),
+            EnqueueOptions::new().priority(200),
+        )
+        .await?;
+
+    // Then high priority
+    let high_priority = queue
+        .enqueue_with_options(
+            "priority_test",
+            "job",
+            serde_json::json!({"priority": "high"}),
+            EnqueueOptions::new().priority(1),
+        )
+        .await?;
+
+    // Should claim high priority first
+    let claimed = queue.claim("priority_test", "worker-1").await?.unwrap();
+    assert_eq!(
+        claimed.id, high_priority,
+        "High priority job should be claimed first"
+    );
+
+    let claimed = queue.claim("priority_test", "worker-1").await?.unwrap();
+    assert_eq!(
+        claimed.id, low_priority,
+        "Low priority job should be claimed second"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_dlq_operations() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    let config = QueueConfig::default();
+    let queue = PgQueue::new(pool, config).await?;
+
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Enqueue a job with max 1 attempt
+    let job_id = queue
+        .enqueue_with_options(
+            "dlq_test",
+            "job",
+            serde_json::json!({"dlq": true}),
+            EnqueueOptions::new().max_attempts(1),
+        )
+        .await?;
+
+    // Claim and fail the job immediately -> should go to DLQ
+    queue.claim("dlq_test", "worker-1").await?;
+    queue.fail(job_id, "worker-1", "Immediate failure").await?;
+
+    // Job should be in DLQ
+    let count = queue.dlq_count("dlq_test").await?;
+    assert_eq!(count, 1);
+
+    // Drain the DLQ
+    let dead_jobs = queue.drain_dlq("dlq_test", 10).await?;
+    assert_eq!(dead_jobs.len(), 1);
+    assert_eq!(dead_jobs[0].original_job_id, job_id);
+    assert_eq!(
+        dead_jobs[0].error_message.as_deref(),
+        Some("Immediate failure")
+    );
+
+    // Requeue the dead job
+    let new_job_id = queue.requeue_dlq(dead_jobs[0].id).await?;
+    assert_ne!(new_job_id, job_id); // Should get a new ID
+
+    // DLQ should be empty now
+    let count = queue.dlq_count("dlq_test").await?;
+    assert_eq!(count, 0);
+
+    // New job should be claimable
+    let job = queue.claim("dlq_test", "worker-1").await?.unwrap();
+    assert_eq!(job.id, new_job_id);
 
     Ok(())
 }

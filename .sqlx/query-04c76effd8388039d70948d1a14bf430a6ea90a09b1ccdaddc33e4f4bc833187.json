@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        INSERT INTO dlq_jobs (original_job_id, queue_name, job_type, payload, attempts, max_attempts, error_message)\n                        VALUES ($1, $2, $3, $4, $5, $6, $7)\n                        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Int4",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "04c76effd8388039d70948d1a14bf430a6ea90a09b1ccdaddc33e4f4bc833187"
+}

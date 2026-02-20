@@ -1,12 +1,15 @@
 # tokio-pgqueue
 
-A Postgres-backed job queue for Rust with heartbeat-based job claims, crash recovery, and exponential backoff for retries.
+A Postgres-backed job queue for Rust with heartbeat-based job claims, crash recovery, exponential backoff for retries, scheduled jobs, job priority, and dead letter queue support.
 
 ## Features
 
 - **Heartbeat-based job claims** - Workers claim jobs and periodically send heartbeats to indicate they're still alive
 - **Crash recovery** - Orphaned jobs (where the worker crashed) can be automatically reclaimed
 - **Exponential backoff** - Failed jobs are automatically retried with increasing delays
+- **Scheduled jobs** - Schedule jobs to run at a specific time or after a delay
+- **Job priority** - Assign priorities to jobs (lower value = higher priority)
+- **Dead letter queue** - Failed jobs are moved to DLQ for inspection and requeue
 - **Tokio-native** - Built on tokio and sqlx for full async support
 - **Skip-locked claiming** - Uses `SELECT FOR UPDATE SKIP LOCKED` for efficient, non-blocking job claiming
 
@@ -101,10 +104,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Scheduled Jobs
+
+Schedule jobs to run at a specific time or after a delay:
+
+```rust
+use tokio_pgqueue::{PgQueue, EnqueueOptions};
+use chrono::{Utc, Duration};
+
+// Schedule for a specific time
+let run_at = Utc::now() + Duration::hours(2);
+let job_id = queue.enqueue_at(
+    "my_queue",
+    "scheduled_task",
+    serde_json::json!({"task": "cleanup"}),
+    run_at
+).await?;
+
+// Schedule to run after a delay
+let job_id = queue.enqueue_after(
+    "my_queue",
+    "delayed_task",
+    serde_json::json!({"data": "value"}),
+    std::time::Duration::from_secs(60)
+).await?;
+
+// Or use EnqueueOptions
+let options = EnqueueOptions::new()
+    .run_after(std::time::Duration::from_secs(300));
+let job_id = queue.enqueue_with_options("my_queue", "task", serde_json::json!({}), options).await?;
+```
+
+## Job Priority
+
+Jobs can have priorities assigned (0-255, lower value = higher priority):
+
+```rust
+use tokio_pgqueue::EnqueueOptions;
+
+// High priority job (priority 0 = highest)
+let options = EnqueueOptions::new()
+    .priority(10);  // Will be processed before priority 100 jobs
+let job_id = queue.enqueue_with_options(
+    "my_queue",
+    "urgent_task",
+    serde_json::json!({"urgent": true}),
+    options
+).await?;
+
+// Low priority job (default is 100)
+let options = EnqueueOptions::new()
+    .priority(200);  // Will be processed after lower priority jobs
+```
+
+When claiming jobs, workers will get the highest priority (lowest value) jobs first.
+
+## Dead Letter Queue
+
+When jobs exhaust all retry attempts, they are moved to the dead letter queue:
+
+```rust
+// Inspect failed jobs
+let dead_jobs = queue.drain_dlq("my_queue", 100).await?;
+for job in dead_jobs {
+    println!(
+        "Job {} failed after {} attempts: {:?}",
+        job.original_job_id,
+        job.attempts,
+        job.error_message
+    );
+}
+
+// Requeue a failed job for retry
+let new_job_id = queue.requeue_dlq(dead_job.id).await?;
+
+// Or delete it permanently
+queue.delete_dlq_job(dead_job.id).await?;
+
+// Get count of failed jobs
+let count = queue.dlq_count("my_queue").await?;
+```
+
 ### Error Handling and Retries
 
 ```rust
-use tokio_pgqueue::{PgQueue, QueueConfig};
+use tokio_pgqueue::{PgQueue, QueueConfig, EnqueueOptions};
 
 async fn process_with_retry(queue: &PgQueue) -> Result<(), Box<dyn std::error::Error>> {
     let worker_id = "worker-1";
@@ -128,6 +212,7 @@ async fn process_with_retry(queue: &PgQueue) -> Result<(), Box<dyn std::error::E
             }
             Err(e) => {
                 // Mark as failed - will be retried with exponential backoff
+                // After max attempts, moves to DLQ
                 queue.fail(job.id, worker_id, &format!("{:?}", e)).await?;
             }
         }
@@ -137,6 +222,11 @@ async fn process_with_retry(queue: &PgQueue) -> Result<(), Box<dyn std::error::E
 
     Ok(())
 }
+
+// Configure max attempts per job
+let options = EnqueueOptions::new()
+    .max_attempts(5);  // Job will be retried up to 5 times before DLQ
+let job_id = queue.enqueue_with_options("my_queue", "task", serde_json::json!({}), options).await?;
 ```
 
 ### Reclaiming Orphaned Jobs
@@ -191,6 +281,18 @@ let worker = WorkerBuilder::new("my_queue", "worker-1")
     .build()?;
 ```
 
+### EnqueueOptions
+
+```rust
+use tokio_pgqueue::EnqueueOptions;
+use chrono::{Utc, Duration};
+
+let options = EnqueueOptions::new()
+    .priority(50)                              // Higher priority (lower = higher)
+    .run_at(Utc::now() + Duration::hours(1))   // Schedule for later
+    .max_attempts(5);                          // Custom retry limit
+```
+
 ## Database Schema
 
 The crate automatically creates the following schema when you call `PgQueue::new()`:
@@ -204,6 +306,7 @@ CREATE TABLE job_queue (
     job_type TEXT NOT NULL,
     payload JSONB NOT NULL,
     status job_status NOT NULL DEFAULT 'pending',
+    priority SMALLINT NOT NULL DEFAULT 100,
     attempts INT NOT NULL DEFAULT 0,
     max_attempts INT NOT NULL DEFAULT 3,
     scheduled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -216,11 +319,26 @@ CREATE TABLE job_queue (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_job_queue_pending ON job_queue(queue_name, status, scheduled_at)
+CREATE TABLE dlq_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    original_job_id UUID NOT NULL,
+    queue_name TEXT NOT NULL,
+    job_type TEXT NOT NULL,
+    payload JSONB,
+    attempts INT NOT NULL,
+    max_attempts INT NOT NULL,
+    error_message TEXT,
+    failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_job_queue_pending ON job_queue(queue_name, status, priority, scheduled_at)
     WHERE status = 'pending';
 
 CREATE INDEX idx_job_queue_running ON job_queue(queue_name, status, last_heartbeat_at)
     WHERE status = 'running';
+
+CREATE INDEX idx_dlq_jobs_queue ON dlq_jobs(queue_name, failed_at);
 ```
 
 ## Job Lifecycle
@@ -228,13 +346,13 @@ CREATE INDEX idx_job_queue_running ON job_queue(queue_name, status, last_heartbe
 1. **Pending** - Job is enqueued and waiting to be claimed
 2. **Running** - Job is claimed by a worker and being processed
 3. **Completed** - Job finished successfully
-4. **Failed** - Job failed and exceeded max retry attempts
+4. **Failed → DLQ** - Job failed and exceeded max retry attempts, moved to dead letter queue
 
-When a job fails, it is automatically re-queued with exponential backoff (2^attempts seconds, capped at ~17 minutes) until `max_attempts` is reached (default: 3).
+When a job fails, it is automatically re-queued with exponential backoff (2^attempts seconds, capped at ~17 minutes) until `max_attempts` is reached (default: 3), after which it moves to the DLQ.
 
 ## Requirements
 
-- Rust 1.70 or later
+- Rust 1.80 or later
 - PostgreSQL 12 or later
 - The `gen_random_uuid()` function (available in PostgreSQL 13+, or enable the `pgcrypto` extension)
 
