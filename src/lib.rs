@@ -55,9 +55,9 @@
 //! # }
 //! ```
 
-mod error;
-mod types;
-mod worker;
+pub mod error;
+pub mod types;
+pub mod worker;
 
 pub use error::{QueueError, Result};
 pub use types::{DeadJob, DlqConfig, EnqueueOptions, Job, JobId, JobStatus, QueueConfig};
