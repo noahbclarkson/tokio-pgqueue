@@ -55,8 +55,8 @@
 //! # }
 //! ```
 
-pub mod error;
-pub mod types;
+mod error;
+mod types;
 pub mod worker;
 
 pub use error::{QueueError, Result};

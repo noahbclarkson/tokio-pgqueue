@@ -1,4 +1,4 @@
-use tokio_pgqueue::types::{EnqueueOptions};
+use tokio_pgqueue::EnqueueOptions;
 use chrono::{Utc, Duration};
 
 #[test]
