@@ -16,10 +16,11 @@ fn test_enqueue_options_builder() {
 
 #[test]
 fn test_enqueue_options_run_after() {
+    let before = Utc::now();
     let opts = EnqueueOptions::new().run_after(std::time::Duration::from_secs(60));
     let run_at = opts.run_at.unwrap();
-    let now = Utc::now();
-    assert!(run_at > now && run_at <= now + Duration::seconds(61));
+    assert!(run_at >= before + Duration::seconds(60));
+    assert!(run_at <= before + Duration::seconds(61));
 }
 
 #[test]
