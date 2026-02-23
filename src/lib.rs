@@ -488,7 +488,7 @@ impl PgQueue {
 
                 let new_attempts = row.attempts + 1;
 
-                if new_attempts > row.max_attempts {
+                if new_attempts >= row.max_attempts {
                     // Move to dead letter queue
                     sqlx::query!(
                         r#"
@@ -518,10 +518,8 @@ impl PgQueue {
                     metrics::record_dlq_entry(&row.queue_name);
                     Ok(())
                 } else {
-                    // Re-queue with exponential backoff
-                    // Backoff: 2^attempts seconds, capped at 1 hour
-                    let backoff_seconds = 2u64.pow((new_attempts as u32).min(10)); // Max 2^10 = 1024 seconds ~ 17 min
-                    let backoff = Duration::seconds(backoff_seconds as i64);
+                    // Re-queue immediately (no backoff)
+                    let backoff = Duration::seconds(0);
                     let scheduled_at = now + backoff;
 
                     sqlx::query!(
@@ -537,7 +535,7 @@ impl PgQueue {
                             error_message = $3
                         WHERE id = $4
                         "#,
-                        new_attempts as i32,
+                        new_attempts,
                         scheduled_at,
                         error_message,
                         job_id
