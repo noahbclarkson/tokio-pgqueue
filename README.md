@@ -293,6 +293,68 @@ let options = EnqueueOptions::new()
     .max_attempts(5);                          // Custom retry limit
 ```
 
+## Observability (optional `metrics` feature)
+
+`tokio-pgqueue` ships with built-in telemetry hooks behind an optional **`metrics`** feature
+flag. When enabled, it records counters, histograms, and gauges through the
+[`metrics`](https://docs.rs/metrics) facade crate so that any compatible recorder
+(e.g. [`metrics-exporter-prometheus`](https://docs.rs/metrics-exporter-prometheus)) receives
+the data automatically.
+
+### Enable the feature
+
+```toml
+[dependencies]
+tokio-pgqueue = { version = "0.1", features = ["metrics"] }
+
+# Choose a backend — Prometheus is the most common choice:
+metrics-exporter-prometheus = "0.15"
+```
+
+### Install a recorder
+
+Install your preferred recorder once at application startup, before any queue operations:
+
+```rust
+use metrics_exporter_prometheus::PrometheusBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Bind the Prometheus scrape endpoint on :9000
+    PrometheusBuilder::new()
+        .install()
+        .expect("failed to install Prometheus recorder");
+
+    let pool = sqlx::PgPool::connect("postgres://localhost/db").await?;
+    let queue = tokio_pgqueue::PgQueue::new(pool, Default::default()).await?;
+
+    // From this point every enqueue / heartbeat / DLQ event is captured.
+    queue.enqueue("jobs", "send_email", serde_json::json!({"to": "alice@example.com"})).await?;
+
+    // Snapshot the current queue depth (also emits the gauge metric):
+    let depth = queue.queue_depth("jobs").await?;
+    println!("Pending jobs: {}", depth);
+
+    Ok(())
+}
+```
+
+### Metrics reference
+
+| Metric name | Kind | Labels | Description |
+|---|---|---|---|
+| `tokio_pgqueue_jobs_enqueued_total` | Counter | `queue_name` | Jobs added to the queue |
+| `tokio_pgqueue_jobs_completed_total` | Counter | `queue_name`, `status` (`success`/`failed`) | Jobs that finished processing |
+| `tokio_pgqueue_job_processing_seconds` | Histogram | `queue_name` | Wall-clock time spent processing a job |
+| `tokio_pgqueue_heartbeats_total` | Counter | `queue_name`, `status` (`success`/`failure`) | Heartbeat attempts |
+| `tokio_pgqueue_dlq_entries_total` | Counter | `queue_name` | Jobs moved to the dead-letter queue |
+| `tokio_pgqueue_queue_depth` | Gauge | `queue_name` | Number of pending jobs (call `queue.queue_depth()`) |
+
+### Without the feature
+
+When the `metrics` feature is **not** enabled every recording function compiles to a
+zero-cost no-op — there is no runtime overhead and no dependency on the `metrics` crate.
+
 ## Database Schema
 
 The crate automatically creates the following schema when you call `PgQueue::new()`:
