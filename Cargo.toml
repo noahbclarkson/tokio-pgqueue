@@ -9,6 +9,10 @@ repository = "https://github.com/noahbclarkson/tokio-pgqueue"
 keywords = ["postgres", "queue", "job", "async", "tokio"]
 categories = ["asynchronous", "database"]
 
+[features]
+default = []
+metrics = ["dep:metrics"]
+
 [dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "chrono", "uuid", "json", "migrate"] }
 tokio = { version = "1.40", features = ["full"] }
@@ -19,7 +23,10 @@ anyhow = "1.0"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["serde", "v4"] }
+metrics = { version = "0.24", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full", "test-util"] }
 tracing-subscriber = "0.3.22"
+metrics = { version = "0.24" }
+metrics-util = { version = "0.18" }
