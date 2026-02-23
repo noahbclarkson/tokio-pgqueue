@@ -4,7 +4,7 @@ use std::env;
 use std::time::Duration;
 use sqlx::postgres::PgPoolOptions;
 use tracing::{info, error};
-use tokio_pgqueue::{PgQueue, EnqueueOptions, Worker, Job};
+use tokio_pgqueue::{PgQueue, EnqueueOptions, QueueWorker, WorkerBuilder, Job, QueueConfig};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct EmailJob {
@@ -32,10 +32,9 @@ async fn main() -> Result<()> {
     info!("Database connected successfully.");
 
     // Create a new queue instance pointing to the 'email_queue'
-    let queue = PgQueue::new(pool, "email_queue");
+    let config = QueueConfig::default();
+    let queue = PgQueue::new(pool, config).await?;
 
-    // Initialize the queue schema (creates the table if it doesn't exist)
-    queue.init().await?;
     info!("Queue initialized.");
 
     // 1. Enqueue a job
@@ -45,47 +44,59 @@ async fn main() -> Result<()> {
         body: "Thanks for signing up.".to_string(),
     };
 
-    let job_id = queue.enqueue(
+    let options = EnqueueOptions::new()
+            .max_attempts(3); // Allow up to 3 retries if the job fails
+
+    let job_id = queue.enqueue_with_options(
+        "email_queue",
+        "send_email",
         serde_json::to_value(&payload)?,
-        EnqueueOptions::default()
-            .with_max_retries(3) // Allow up to 3 retries if the job fails
+        options
     ).await?;
 
     info!("Enqueued job with ID: {}", job_id);
 
     // 2. Set up a worker to process jobs
     let worker_queue = queue.clone();
-    let mut worker = Worker::new(worker_queue);
     
     info!("Starting worker... (Waiting for jobs)");
     
     // We'll run the worker in a separate task
     let worker_handle = tokio::spawn(async move {
+        // Build the worker
+        let worker = WorkerBuilder::new("email_queue", "worker-1")
+            .queue(worker_queue)
+            .handler_fn(|job: Job| async move {
+                info!("Worker claimed job: {}", job.id);
+                
+                // Try to deserialize the payload
+                match serde_json::from_value::<EmailJob>(job.payload.clone()) {
+                    Ok(email) => {
+                        info!("Sending email to: {}", email.to);
+                        info!("Subject: {}", email.subject);
+                        
+                        // Simulate some work (e.g., sending an actual email)
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        
+                        info!("Email sent successfully!");
+                        Ok(()) // Return Ok to mark the job as completed
+                    }
+                    Err(e) => {
+                        error!("Failed to parse job payload: {}", e);
+                        // Return Err to mark the job as failed. 
+                        // It will be retried if retry_count < max_retries.
+                        // If it exceeds max_retries, it will be marked as 'dead' (DLQ).
+                        Err(tokio_pgqueue::QueueError::InvalidConfig(format!("Payload parse error: {}", e)))
+                    }
+                }
+            })
+            .build()
+            .expect("Failed to build worker");
+
         // process_jobs will run forever, polling for new jobs
-        worker.process_jobs(|job: Job| async move {
-            info!("Worker claimed job: {}", job.id);
-            
-            // Try to deserialize the payload
-            match serde_json::from_value::<EmailJob>(job.payload.clone()) {
-                Ok(email) => {
-                    info!("Sending email to: {}", email.to);
-                    info!("Subject: {}", email.subject);
-                    
-                    // Simulate some work (e.g., sending an actual email)
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    
-                    info!("Email sent successfully!");
-                    Ok(()) // Return Ok to mark the job as completed
-                }
-                Err(e) => {
-                    error!("Failed to parse job payload: {}", e);
-                    // Return Err to mark the job as failed. 
-                    // It will be retried if retry_count < max_retries.
-                    // If it exceeds max_retries, it will be marked as 'dead' (DLQ).
-                    Err(anyhow::anyhow!("Payload parse error: {}", e))
-                }
-            }
-        }).await;
+        if let Err(e) = worker.run().await {
+            error!("Worker error: {:?}", e);
+        }
     });
 
     // Let the worker run for a few seconds to process the job
@@ -97,10 +108,14 @@ async fn main() -> Result<()> {
         "bad_format": true
     });
     
-    let bad_job_id = queue.enqueue(
+    let bad_options = EnqueueOptions::new()
+            .max_attempts(1); // Only retry once
+
+    let bad_job_id = queue.enqueue_with_options(
+        "email_queue",
+        "send_email",
         bad_payload,
-        EnqueueOptions::default()
-            .with_max_retries(1) // Only retry once
+        bad_options
     ).await?;
     
     info!("Enqueued bad job with ID: {}", bad_job_id);
