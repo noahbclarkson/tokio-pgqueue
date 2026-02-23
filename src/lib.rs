@@ -56,6 +56,7 @@
 //! ```
 
 mod error;
+pub mod metrics;
 mod types;
 pub mod worker;
 
@@ -178,6 +179,7 @@ impl PgQueue {
             "Enqueued job {} (type: {}, queue: {}, priority: {}, scheduled_at: {})",
             row.id, job_type, queue_name, options.priority, scheduled_at
         );
+        metrics::record_job_enqueued(queue_name);
         Ok(row.id)
     }
 
@@ -331,7 +333,7 @@ impl PgQueue {
             UPDATE job_queue
             SET last_heartbeat_at = $1
             WHERE id = $2 AND worker_id = $3 AND status = 'running'
-            RETURNING id
+            RETURNING id, queue_name
             "#,
             now,
             job_id,
@@ -341,15 +343,22 @@ impl PgQueue {
         .await?;
 
         match result {
-            Some(_) => Ok(()),
+            Some(row) => {
+                metrics::record_heartbeat(&row.queue_name, "success");
+                Ok(())
+            }
             None => {
                 // Job might not exist or not owned by this worker
-                let job = sqlx::query!("SELECT id, worker_id FROM job_queue WHERE id = $1", job_id)
-                    .fetch_optional(&self.pool)
-                    .await?;
+                let job = sqlx::query!(
+                    "SELECT id, worker_id, queue_name FROM job_queue WHERE id = $1",
+                    job_id
+                )
+                .fetch_optional(&self.pool)
+                .await?;
 
                 match job {
                     Some(row) => {
+                        metrics::record_heartbeat(&row.queue_name, "failure");
                         if let Some(claimed_by) = row.worker_id {
                             if claimed_by != worker_id {
                                 return Err(QueueError::OwnershipViolation {
@@ -506,6 +515,7 @@ impl PgQueue {
                         "Job {} moved to DLQ after {} attempts: {}",
                         job_id, row.max_attempts, error_message
                     );
+                    metrics::record_dlq_entry(&row.queue_name);
                     Ok(())
                 } else {
                     // Re-queue with exponential backoff
@@ -661,6 +671,31 @@ impl PgQueue {
             })),
             None => Ok(None),
         }
+    }
+
+    /// Get the number of pending jobs in a queue and record the value as a gauge metric.
+    ///
+    /// This is useful for exposing queue depth to monitoring systems. When the `metrics`
+    /// feature is enabled the value is also emitted as the `tokio_pgqueue_queue_depth` gauge.
+    ///
+    /// # Arguments
+    ///
+    /// * `queue_name` - The name of the queue to measure
+    ///
+    /// # Returns
+    ///
+    /// The number of jobs currently in the `pending` state for this queue.
+    pub async fn queue_depth(&self, queue_name: &str) -> Result<u64> {
+        let row = sqlx::query!(
+            "SELECT COUNT(*) as count FROM job_queue WHERE queue_name = $1 AND status = 'pending'",
+            queue_name
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let depth = row.count.unwrap_or(0) as u64;
+        metrics::record_queue_depth(queue_name, depth as f64);
+        Ok(depth)
     }
 
     // ========================================

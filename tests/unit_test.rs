@@ -1,5 +1,5 @@
 use tokio_pgqueue::EnqueueOptions;
-use chrono::{Utc, Duration};
+use chrono::{Duration, Utc};
 
 #[test]
 fn test_enqueue_options_builder() {

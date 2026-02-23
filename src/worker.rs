@@ -1,4 +1,4 @@
-use crate::{Job, PgQueue, Result};
+use crate::{metrics, Job, PgQueue, Result};
 use std::{pin::Pin, sync::Arc, time::Duration};
 use tokio::time::sleep;
 use tracing::{error, info};
@@ -209,21 +209,28 @@ impl QueueWorker {
                         }
                     });
 
-                    // Process the job
+                    // Process the job, capturing elapsed time for metrics
+                    let process_start = std::time::Instant::now();
                     let result = (self.handler)(job.clone()).await;
+                    let elapsed_secs = process_start.elapsed().as_secs_f64();
 
                     // Abort heartbeat task
                     heartbeat_handle.abort();
 
+                    // Record processing time regardless of outcome
+                    metrics::record_job_processing_time(&job.queue_name, elapsed_secs);
+
                     // Report job completion/failure
                     match result {
                         Ok(()) => {
+                            metrics::record_job_completed(&job.queue_name, "success");
                             if let Err(e) = self.queue.complete(job.id, &self.worker_id).await {
                                 error!("Failed to mark job {} as complete: {:?}", job.id, e);
                             }
                         }
                         Err(e) => {
                             error!("Job {} failed: {:?}", job.id, e);
+                            metrics::record_job_completed(&job.queue_name, "failed");
                             if let Err(err) = self
                                 .queue
                                 .fail(job.id, &self.worker_id, &format!("{e:?}"))
