@@ -4,7 +4,7 @@ use std::env;
 use std::time::Duration;
 use sqlx::postgres::PgPoolOptions;
 use tracing::{info, error};
-use tokio_pgqueue::{PgQueue, EnqueueOptions, QueueWorker, WorkerBuilder, Job, QueueConfig};
+use tokio_pgqueue::{PgQueue, EnqueueOptions, WorkerBuilder, Job, QueueConfig};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct EmailJob {
