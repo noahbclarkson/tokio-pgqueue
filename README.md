@@ -13,6 +13,20 @@ A Postgres-backed job queue for Rust with heartbeat-based job claims, crash reco
 - **Tokio-native** - Built on tokio and sqlx for full async support
 - **Skip-locked claiming** - Uses `SELECT FOR UPDATE SKIP LOCKED` for efficient, non-blocking job claiming
 
+## Examples
+
+The `examples/` directory contains several runnable examples demonstrating different usage patterns:
+
+* **[basic_queue](examples/basic_queue.rs)**: A simple example showing how to enqueue a job, run a worker, and handle a failed job going to the DLQ.
+* **[scheduled_jobs](examples/scheduled_jobs.rs)**: Demonstrates job scheduling (`run_after`), priority levels, and requeuing from the Dead Letter Queue.
+* **[multi_queue](examples/multi_queue.rs)**: Shows how to run multiple distinct queues (e.g. emails, notifications) on the same database pool using concurrent workers.
+* **[web_server_integration](examples/web_server_integration.rs)**: Illustrates the common pattern of integrating the queue as background workers running alongside an async web server (like axum).
+
+You can run an example using Cargo (requires a local Postgres database):
+```bash
+DATABASE_URL="postgres://user:pass@localhost:5432/db" cargo run --example basic_queue
+```
+
 ## Installation
 
 Add this to your `Cargo.toml`:

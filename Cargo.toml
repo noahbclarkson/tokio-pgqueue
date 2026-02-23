@@ -30,3 +30,20 @@ tokio = { version = "1.35", features = ["full", "test-util"] }
 tracing-subscriber = "0.3.22"
 metrics = { version = "0.24" }
 metrics-util = { version = "0.18" }
+
+[[example]]
+name = "basic_queue"
+path = "examples/basic_queue.rs"
+
+[[example]]
+name = "scheduled_jobs"
+path = "examples/scheduled_jobs.rs"
+
+[[example]]
+name = "multi_queue"
+path = "examples/multi_queue.rs"
+
+[[example]]
+name = "web_server_integration"
+path = "examples/web_server_integration.rs"
+
