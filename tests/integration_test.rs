@@ -8,7 +8,7 @@
 //   cargo test -- --ignored
 
 use sqlx::PgPool;
-use tokio_pgqueue::{JobStatus, PgQueue, QueueConfig, WorkerBuilder};
+use tokio_pgqueue::{BackoffStrategy, JobStatus, PgQueue, QueueConfig, WorkerBuilder};
 use uuid::Uuid;
 
 // Helper to get a test database URL
@@ -128,7 +128,11 @@ async fn test_heartbeat() -> Result<(), Box<dyn std::error::Error>> {
 #[ignore = "requires postgres"]
 async fn test_fail_and_retry() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&test_db_url()).await?;
-    let config = QueueConfig::default();
+    // Use no backoff so tests can claim immediately after fail
+    let config = QueueConfig {
+        backoff_strategy: BackoffStrategy::None,
+        ..QueueConfig::default()
+    };
     let queue = PgQueue::new(pool, config).await?;
     let queue_name = unique_queue_name("fail_retry");
 

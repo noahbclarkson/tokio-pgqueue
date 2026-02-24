@@ -1,5 +1,6 @@
-use tokio_pgqueue::EnqueueOptions;
+use tokio_pgqueue::{BackoffStrategy, EnqueueOptions, QueueConfig};
 use chrono::{Duration, Utc};
+use std::time::Duration as StdDuration;
 
 #[test]
 fn test_enqueue_options_builder() {
@@ -32,7 +33,6 @@ fn test_enqueue_options_default() {
 }
 
 use tokio_pgqueue::worker::WorkerConfig;
-use std::time::Duration as StdDuration;
 
 #[test]
 fn test_worker_config_builder() {
@@ -41,4 +41,53 @@ fn test_worker_config_builder() {
     assert_eq!(config.heartbeat_interval, StdDuration::from_secs(30));
     assert_eq!(config.auto_reclaim, true);
     assert_eq!(config.reclaim_timeout, StdDuration::from_secs(300));
+}
+
+#[test]
+fn test_backoff_strategy_none() {
+    let strategy = BackoffStrategy::None;
+    assert_eq!(strategy.duration(0), StdDuration::ZERO);
+    assert_eq!(strategy.duration(1), StdDuration::ZERO);
+    assert_eq!(strategy.duration(10), StdDuration::ZERO);
+}
+
+#[test]
+fn test_backoff_strategy_fixed() {
+    let strategy = BackoffStrategy::Fixed(StdDuration::from_secs(30));
+    assert_eq!(strategy.duration(0), StdDuration::from_secs(30));
+    assert_eq!(strategy.duration(1), StdDuration::from_secs(30));
+    assert_eq!(strategy.duration(5), StdDuration::from_secs(30));
+}
+
+#[test]
+fn test_backoff_strategy_exponential() {
+    let strategy = BackoffStrategy::Exponential {
+        base_secs: 2,
+        max_secs: 1024,
+    };
+    // 2 * 2^0 = 2
+    assert_eq!(strategy.duration(0), StdDuration::from_secs(2));
+    // 2 * 2^1 = 4
+    assert_eq!(strategy.duration(1), StdDuration::from_secs(4));
+    // 2 * 2^2 = 8
+    assert_eq!(strategy.duration(2), StdDuration::from_secs(8));
+    // 2 * 2^5 = 64
+    assert_eq!(strategy.duration(5), StdDuration::from_secs(64));
+    // 2 * 2^9 = 1024 (hits max)
+    assert_eq!(strategy.duration(9), StdDuration::from_secs(1024));
+    // 2 * 2^10 = 2048 but capped at 1024
+    assert_eq!(strategy.duration(10), StdDuration::from_secs(1024));
+}
+
+#[test]
+fn test_queue_config_default_backoff() {
+    let config = QueueConfig::default();
+    // Default should be exponential backoff
+    match config.backoff_strategy {
+        BackoffStrategy::Exponential { base_secs, max_secs } => {
+            assert_eq!(base_secs, 2);
+            assert_eq!(max_secs, 1024);
+        }
+        _ => panic!("Default backoff strategy should be Exponential"),
+    }
 }

@@ -61,7 +61,7 @@ mod types;
 pub mod worker;
 
 pub use error::{QueueError, Result};
-pub use types::{DeadJob, DlqConfig, EnqueueOptions, Job, JobId, JobStatus, QueueConfig};
+pub use types::{BackoffStrategy, DeadJob, DlqConfig, EnqueueOptions, Job, JobId, JobStatus, QueueConfig};
 pub use worker::{QueueWorker, WorkerBuilder};
 
 use chrono::{DateTime, Duration, Utc};
@@ -518,8 +518,9 @@ impl PgQueue {
                     metrics::record_dlq_entry(&row.queue_name);
                     Ok(())
                 } else {
-                    // Re-queue immediately (no backoff)
-                    let backoff = Duration::seconds(0);
+                    // Re-queue with backoff according to strategy
+                    let backoff = Duration::from_std(self.config.backoff_strategy.duration(new_attempts as u32))
+                        .unwrap_or_else(|_| Duration::seconds(0));
                     let scheduled_at = now + backoff;
 
                     sqlx::query!(
