@@ -2,8 +2,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Unique identifier for a job in the queue.
 pub type JobId = Uuid;
 
+/// A job in the queue.
+///
+/// Jobs contain all metadata about a queued task including its payload,
+/// current status, retry attempts, and worker assignment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: JobId,
@@ -24,6 +29,7 @@ pub struct Job {
     pub updated_at: DateTime<Utc>,
 }
 
+/// The current status of a job in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "job_status", rename_all = "lowercase")]
 pub enum JobStatus {
@@ -45,6 +51,9 @@ impl std::fmt::Display for JobStatus {
 }
 
 impl JobStatus {
+    /// Returns the string representation of the job status.
+    ///
+    /// This matches the database enum value and is useful for logging or serialization.
     pub fn as_str(&self) -> &'static str {
         match self {
             JobStatus::Pending => "pending",
@@ -55,6 +64,10 @@ impl JobStatus {
     }
 }
 
+/// Configuration options for the job queue.
+///
+/// This controls timing behaviors like heartbeat timeouts, polling intervals,
+/// and retry backoff strategies.
 #[derive(Debug, Clone)]
 pub struct QueueConfig {
     /// How long a job can be without a heartbeat before being considered orphaned
@@ -196,7 +209,10 @@ impl Default for DlqConfig {
     }
 }
 
-/// A job that has been moved to the dead letter queue.
+/// A job that has been moved to the dead letter queue after exhausting all retry attempts.
+///
+/// Dead jobs retain their original payload and error information for inspection
+/// and potential requeue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeadJob {
     pub id: Uuid,

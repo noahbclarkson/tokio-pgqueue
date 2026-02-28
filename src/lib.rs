@@ -105,12 +105,18 @@ impl PgQueue {
         Ok(PgQueue { pool, config })
     }
 
-    /// Get a reference to the database pool.
+    /// Get a reference to the underlying database connection pool.
+    ///
+    /// This can be useful for running custom queries or transactions
+    /// alongside queue operations.
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
     /// Get a reference to the queue configuration.
+    ///
+    /// Returns the active configuration controlling timeouts, backoff strategy,
+    /// and other queue behaviors.
     pub fn config(&self) -> &QueueConfig {
         &self.config
     }
@@ -633,7 +639,15 @@ impl PgQueue {
         Ok(jobs)
     }
 
-    /// Get a job by ID.
+    /// Retrieve a job by its ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `job_id` - The unique identifier of the job to retrieve
+    ///
+    /// # Returns
+    ///
+    /// `Some(job)` if found, `None` if the job doesn't exist.
     pub async fn get_job(&self, job_id: JobId) -> Result<Option<Job>> {
         let row = sqlx::query!(
             r#"
