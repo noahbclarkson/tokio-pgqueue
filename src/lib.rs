@@ -162,7 +162,7 @@ impl PgQueue {
         options: EnqueueOptions,
     ) -> Result<JobId> {
         let scheduled_at = options.run_at.unwrap_or_else(Utc::now);
-        let max_attempts = options.max_attempts.unwrap_or(3) as i32;
+        let max_attempts = options.max_attempts.unwrap_or(5) as i32;
         let priority = options.priority as i16;
 
         let row = sqlx::query!(

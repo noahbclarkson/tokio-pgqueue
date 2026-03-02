@@ -101,7 +101,7 @@ pub struct EnqueueOptions {
     pub priority: u8,
     /// When the job should become available for claiming (default: immediately)
     pub run_at: Option<DateTime<Utc>>,
-    /// Maximum number of retry attempts (default: 3)
+    /// Maximum number of retry attempts (default: 5)
     pub max_attempts: Option<u32>,
 }
 
@@ -141,6 +141,9 @@ impl EnqueueOptions {
     }
 
     /// Set the maximum number of retry attempts.
+    ///
+    /// After this many attempts, the job will be moved to the dead letter queue.
+    /// Default is 5 attempts.
     pub fn max_attempts(mut self, max_attempts: u32) -> Self {
         self.max_attempts = Some(max_attempts);
         self

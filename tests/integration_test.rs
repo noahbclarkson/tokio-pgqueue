@@ -54,7 +54,7 @@ async fn test_enqueue_and_get_job() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(job.payload, payload);
     assert_eq!(job.status, JobStatus::Pending);
     assert_eq!(job.attempts, 0);
-    assert_eq!(job.max_attempts, 3);
+    assert_eq!(job.max_attempts, 5); // Default is now 5
 
     Ok(())
 }
@@ -136,9 +136,16 @@ async fn test_fail_and_retry() -> Result<(), Box<dyn std::error::Error>> {
     let queue = PgQueue::new(pool, config).await?;
     let queue_name = unique_queue_name("fail_retry");
 
-    // Enqueue and claim a job
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Enqueue with max_attempts=3 for this test
     let job_id = queue
-        .enqueue(&queue_name, "test_job", serde_json::json!({}))
+        .enqueue_with_options(
+            &queue_name,
+            "test_job",
+            serde_json::json!({}),
+            EnqueueOptions::new().max_attempts(3),
+        )
         .await?;
     let job = queue.claim(&queue_name, "worker-1").await?.unwrap();
 
@@ -165,7 +172,7 @@ async fn test_fail_and_retry() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(job.status, JobStatus::Pending);
     assert_eq!(job.attempts, 2);
 
-    // Claim a third time and fail - should move to DLQ (max_attempts = 3)
+    // Claim a third time and fail - should move to DLQ (we use max_attempts=3 for this test)
     let job = queue.claim(&queue_name, "worker-1").await?.unwrap();
     assert_eq!(job.id, job_id);
     queue.fail(job_id, "worker-1", "Final failure").await?;
@@ -456,6 +463,180 @@ async fn test_dlq_operations() -> Result<(), Box<dyn std::error::Error>> {
     // New job should be claimable
     let job = queue.claim(&queue_name, "worker-1").await?.unwrap();
     assert_eq!(job.id, new_job_id);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_exponential_backoff() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    // Use default exponential backoff
+    let config = QueueConfig::default();
+    let queue = PgQueue::new(pool, config).await?;
+    let queue_name = unique_queue_name("backoff");
+
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Enqueue a job with 5 max attempts
+    let job_id = queue
+        .enqueue_with_options(
+            &queue_name,
+            "job",
+            serde_json::json!({"backoff": true}),
+            EnqueueOptions::new().max_attempts(5),
+        )
+        .await?;
+
+    // First attempt - fail it
+    queue.claim(&queue_name, "worker-1").await?;
+    queue.fail(job_id, "worker-1", "Attempt 1 failed").await?;
+
+    let job = queue.get_job(job_id).await?.unwrap();
+    assert_eq!(job.attempts, 1, "Should have 1 attempt after first failure");
+    assert_eq!(job.status, JobStatus::Pending);
+    
+    // scheduled_at should be in the future due to backoff: 2 * 2^1 = 4 seconds
+    // With base=2, attempt=1: delay = 2 * 2^1 = 4 seconds
+    let now = chrono::Utc::now();
+    let min_expected = now + chrono::Duration::seconds(3); // at least 3 seconds
+    assert!(
+        job.scheduled_at > min_expected,
+        "Job should be scheduled for future (backoff): scheduled_at={}, now={}",
+        job.scheduled_at, now
+    );
+
+    // Claim should not return this job immediately (it's in backoff)
+    let immediate_claim = queue.claim(&queue_name, "worker-1").await?;
+    assert!(
+        immediate_claim.is_none(),
+        "Job in backoff should not be claimable immediately"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_default_max_attempts_is_five() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    let config = QueueConfig::default();
+    let queue = PgQueue::new(pool, config).await?;
+    let queue_name = unique_queue_name("default_max");
+
+    // Enqueue without specifying max_attempts
+    let job_id = queue
+        .enqueue(&queue_name, "job", serde_json::json!({}))
+        .await?;
+
+    let job = queue.get_job(job_id).await?.unwrap();
+    assert_eq!(
+        job.max_attempts, 5,
+        "Default max_attempts should be 5"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_dlq_after_max_attempts() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    // Use no backoff for faster testing
+    let config = QueueConfig {
+        backoff_strategy: BackoffStrategy::None,
+        ..QueueConfig::default()
+    };
+    let queue = PgQueue::new(pool, config).await?;
+    let queue_name = unique_queue_name("dlq_max");
+
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Enqueue with exactly 5 max attempts
+    let job_id = queue
+        .enqueue_with_options(
+            &queue_name,
+            "job",
+            serde_json::json!({"test": "dlq_after_5"}),
+            EnqueueOptions::new().max_attempts(5),
+        )
+        .await?;
+
+    // Fail the job 5 times
+    for i in 1..=5 {
+        queue.claim(&queue_name, "worker-1").await?;
+        queue.fail(job_id, "worker-1", &format!("Attempt {}", i)).await?;
+        
+        if i < 5 {
+            let job = queue.get_job(job_id).await?.unwrap();
+            assert_eq!(job.attempts, i, "After fail {}, attempts should be {}", i, i);
+            assert_eq!(job.status, JobStatus::Pending);
+        }
+    }
+
+    // After 5th failure, job should be in DLQ, not main queue
+    let job = queue.get_job(job_id).await?;
+    assert!(
+        job.is_none(),
+        "Job should be moved to DLQ after max_attempts (5)"
+    );
+
+    // Verify it's in DLQ
+    let dlq_jobs = queue.drain_dlq(&queue_name, 10).await?;
+    assert_eq!(dlq_jobs.len(), 1, "DLQ should have exactly 1 job");
+    assert_eq!(dlq_jobs[0].original_job_id, job_id);
+    assert_eq!(dlq_jobs[0].attempts, 5);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_backoff_increases_each_attempt() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    let config = QueueConfig::default();
+    let queue = PgQueue::new(pool, config).await?;
+    let queue_name = unique_queue_name("backoff_increase");
+
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Enqueue with multiple attempts
+    let job_id = queue
+        .enqueue_with_options(
+            &queue_name,
+            "job",
+            serde_json::json!({}),
+            EnqueueOptions::new().max_attempts(5),
+        )
+        .await?;
+
+    let mut prev_delay_secs = 0i64;
+
+    // Fail multiple times and verify backoff increases
+    for attempt in 1..=3 {
+        queue.claim(&queue_name, "worker-1").await?;
+        let before_fail = chrono::Utc::now();
+        queue.fail(job_id, "worker-1", &format!("Attempt {}", attempt)).await?;
+        
+        let job = queue.get_job(job_id).await?.unwrap();
+        let delay_secs = (job.scheduled_at - before_fail).num_seconds();
+        
+        assert!(
+            delay_secs > prev_delay_secs,
+            "Backoff should increase: attempt {} delay {}s, previous {}s",
+            attempt, delay_secs, prev_delay_secs
+        );
+        
+        prev_delay_secs = delay_secs;
+        
+        // Manually reset scheduled_at for next iteration (simulating time passing)
+        sqlx::query(
+            "UPDATE job_queue SET scheduled_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(queue.pool())
+        .await?;
+    }
 
     Ok(())
 }
