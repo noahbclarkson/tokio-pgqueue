@@ -640,3 +640,219 @@ async fn test_backoff_increases_each_attempt() -> Result<(), Box<dyn std::error:
 
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_delete_dlq_job() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    let config = QueueConfig::default();
+    let queue = PgQueue::new(pool, config).await?;
+    let queue_name = unique_queue_name("delete_dlq");
+
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Enqueue a job with max 1 attempt
+    let job_id = queue
+        .enqueue_with_options(
+            &queue_name,
+            "job",
+            serde_json::json!({"delete_test": true}),
+            EnqueueOptions::new().max_attempts(1),
+        )
+        .await?;
+
+    // Claim and fail the job -> should go to DLQ
+    queue.claim(&queue_name, "worker-1").await?;
+    queue.fail(job_id, "worker-1", "Failed for delete test").await?;
+
+    // Verify it's in DLQ
+    let count = queue.dlq_count(&queue_name).await?;
+    assert_eq!(count, 1, "DLQ should have 1 job");
+
+    // Get the DLQ job
+    let dead_jobs = queue.drain_dlq(&queue_name, 10).await?;
+    assert_eq!(dead_jobs.len(), 1);
+    let dlq_job_id = dead_jobs[0].id;
+
+    // Delete the DLQ job
+    let deleted = queue.delete_dlq_job(dlq_job_id).await?;
+    assert!(deleted, "delete_dlq_job should return true when job exists");
+
+    // Verify it's gone
+    let count = queue.dlq_count(&queue_name).await?;
+    assert_eq!(count, 0, "DLQ should be empty after deletion");
+
+    // Try to delete again - should return false
+    let deleted_again = queue.delete_dlq_job(dlq_job_id).await?;
+    assert!(!deleted_again, "delete_dlq_job should return false when job doesn't exist");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_dlq_list_with_limit() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    let config = QueueConfig::default();
+    let queue = PgQueue::new(pool, config).await?;
+    let queue_name = unique_queue_name("dlq_list");
+
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Enqueue 5 jobs with max 1 attempt each
+    for i in 1..=5 {
+        let job_id = queue
+            .enqueue_with_options(
+                &queue_name,
+                "job",
+                serde_json::json!({"num": i}),
+                EnqueueOptions::new().max_attempts(1),
+            )
+            .await?;
+        queue.claim(&queue_name, "worker-1").await?;
+        queue.fail(job_id, "worker-1", &format!("Failed job {}", i)).await?;
+    }
+
+    // Verify all 5 are in DLQ
+    let count = queue.dlq_count(&queue_name).await?;
+    assert_eq!(count, 5, "DLQ should have 5 jobs");
+
+    // Drain with limit=3 should return only 3
+    let dead_jobs = queue.drain_dlq(&queue_name, 3).await?;
+    assert_eq!(dead_jobs.len(), 3, "Should get exactly 3 jobs with limit=3");
+
+    // Drain again with limit=10 should get remaining 2
+    let remaining = queue.drain_dlq(&queue_name, 10).await?;
+    assert_eq!(remaining.len(), 2, "Should get remaining 2 jobs");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_dlq_replay_preserves_payload() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    let config = QueueConfig::default();
+    let queue = PgQueue::new(pool, config).await?;
+    let queue_name = unique_queue_name("dlq_replay");
+
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Enqueue with specific payload
+    let original_payload = serde_json::json!({
+        "important": "data",
+        "nested": {
+            "value": 42
+        }
+    });
+    
+    let job_id = queue
+        .enqueue_with_options(
+            &queue_name,
+            "important_job",
+            original_payload.clone(),
+            EnqueueOptions::new().max_attempts(1),
+        )
+        .await?;
+
+    // Fail it -> goes to DLQ
+    queue.claim(&queue_name, "worker-1").await?;
+    queue.fail(job_id, "worker-1", "Failed").await?;
+
+    // Get from DLQ
+    let dead_jobs = queue.drain_dlq(&queue_name, 10).await?;
+    assert_eq!(dead_jobs.len(), 1);
+    
+    // Verify payload is preserved
+    assert_eq!(dead_jobs[0].payload, Some(original_payload.clone()));
+    assert_eq!(dead_jobs[0].job_type, "important_job");
+
+    // Requeue it
+    let new_job_id = queue.requeue_dlq(dead_jobs[0].id).await?;
+
+    // Claim the requeued job
+    let job = queue.claim(&queue_name, "worker-1").await?.unwrap();
+    assert_eq!(job.id, new_job_id);
+    assert_eq!(job.payload, original_payload, "Requeued job should preserve original payload");
+    assert_eq!(job.job_type, "important_job");
+    assert_eq!(job.attempts, 0, "Requeued job should start with 0 attempts");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn test_dlq_full_workflow() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPool::connect(&test_db_url()).await?;
+    let config = QueueConfig {
+        backoff_strategy: BackoffStrategy::None,
+        ..QueueConfig::default()
+    };
+    let queue = PgQueue::new(pool, config).await?;
+    let queue_name = unique_queue_name("dlq_workflow");
+
+    use tokio_pgqueue::EnqueueOptions;
+
+    // Test the complete DLQ workflow: fail -> list -> replay -> delete
+    
+    // 1. Enqueue and fail a job
+    let job_id = queue
+        .enqueue_with_options(
+            &queue_name,
+            "test_job",
+            serde_json::json!({"workflow": "test"}),
+            EnqueueOptions::new().max_attempts(2),
+        )
+        .await?;
+
+    // Fail it twice to send to DLQ
+    queue.claim(&queue_name, "worker-1").await?;
+    queue.fail(job_id, "worker-1", "First failure").await?;
+    queue.claim(&queue_name, "worker-1").await?;
+    queue.fail(job_id, "worker-1", "Second failure").await?;
+
+    // 2. List failed jobs from DLQ
+    let dead_jobs = queue.drain_dlq(&queue_name, 10).await?;
+    assert_eq!(dead_jobs.len(), 1, "Should have 1 job in DLQ");
+    let dlq_job = &dead_jobs[0];
+    assert_eq!(dlq_job.original_job_id, job_id);
+    assert_eq!(dlq_job.attempts, 2);
+
+    // 3. Replay (requeue) the failed job
+    let new_job_id = queue.requeue_dlq(dlq_job.id).await?;
+    assert_ne!(new_job_id, job_id, "Requeued job should have new ID");
+
+    // Verify DLQ is now empty
+    let count = queue.dlq_count(&queue_name).await?;
+    assert_eq!(count, 0, "DLQ should be empty after requeue");
+
+    // Claim and complete the requeued job
+    let job = queue.claim(&queue_name, "worker-1").await?.unwrap();
+    assert_eq!(job.id, new_job_id);
+    queue.complete(new_job_id, "worker-1").await?;
+
+    // 4. Create another job, fail it, and delete from DLQ
+    let job_id2 = queue
+        .enqueue_with_options(
+            &queue_name,
+            "delete_test",
+            serde_json::json!({}),
+            EnqueueOptions::new().max_attempts(1),
+        )
+        .await?;
+
+    queue.claim(&queue_name, "worker-1").await?;
+    queue.fail(job_id2, "worker-1", "Failed").await?;
+
+    let dead_jobs = queue.drain_dlq(&queue_name, 10).await?;
+    assert_eq!(dead_jobs.len(), 1);
+
+    // Permanently delete from DLQ
+    let deleted = queue.delete_dlq_job(dead_jobs[0].id).await?;
+    assert!(deleted);
+
+    let count = queue.dlq_count(&queue_name).await?;
+    assert_eq!(count, 0, "DLQ should be empty after permanent deletion");
+
+    Ok(())
+}
