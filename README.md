@@ -426,6 +426,74 @@ CREATE INDEX idx_dlq_jobs_queue ON dlq_jobs(queue_name, failed_at);
 
 When a job fails, it is automatically re-queued with exponential backoff (2^attempts seconds, capped at ~17 minutes) until `max_attempts` is reached (default: 3), after which it moves to the DLQ.
 
+## Best Practices
+
+### Job Priority
+
+- Priority values range from 0 to 255 (lower = higher priority)
+- Default priority is 100
+- Use priority 0-10 for urgent jobs
+- Use priority 200+ for low-priority background tasks
+
+### Retry Configuration
+
+- `max_attempts = 1`: Job goes directly to DLQ on first failure (use for non-retryable operations)
+- `max_attempts = 3`: Default, good for most use cases
+- `max_attempts = 10+`: For jobs with high likelihood of transient failures
+
+### Scheduled Jobs
+
+- Jobs scheduled in the past are immediately claimable
+- Jobs scheduled in the future won't be claimed until their scheduled time
+- Use `run_after()` for delays, `run_at()` for specific times
+
+### Error Handling
+
+The queue returns specific error types for different failure modes:
+
+- `JobNotFound`: Attempting to operate on a non-existent job
+- `OwnershipViolation`: Attempting to complete/fail a job owned by another worker
+- `InvalidJobState`: Attempting invalid state transitions (e.g., completing an already completed job)
+- `DlqJobNotFound`: Attempting to requeue/delete a non-existent DLQ entry
+
+Always handle these errors appropriately in your workers:
+
+```rust
+match queue.complete(job_id, worker_id).await {
+    Ok(()) => println!("Job completed"),
+    Err(QueueError::OwnershipViolation { .. }) => {
+        // Another worker completed this job
+        eprintln!("Warning: Job was claimed by another worker");
+    }
+    Err(QueueError::InvalidJobState(_)) => {
+        // Job was already completed or in an unexpected state
+        eprintln!("Warning: Job is not in running state");
+    }
+    Err(e) => return Err(e.into()),
+}
+```
+
+### Dead Letter Queue
+
+- Regularly inspect and drain your DLQ to understand failure patterns
+- Use `requeue_dlq()` to retry failed jobs after fixing underlying issues
+- Use `delete_dlq_job()` to permanently remove unrecoverable jobs
+- DLQ operations are safe to call on empty queues (return empty results)
+
+### Worker Design
+
+- Use unique worker IDs to track job ownership
+- Send heartbeats every 30 seconds for long-running jobs
+- Configure `auto_reclaim` to recover orphaned jobs on worker startup
+- Claiming from an empty queue returns `None` (not an error)
+
+### Payload Design
+
+- Use structured JSON payloads for complex job data
+- Keep payloads reasonably sized (large payloads impact database performance)
+- Null and empty payloads are valid
+- Consider storing large data in external storage and passing references in payloads
+
 ## Requirements
 
 - Rust 1.80 or later
@@ -435,6 +503,30 @@ When a job fails, it is automatically re-queued with exponential backoff (2^atte
 ## License
 
 MIT OR Apache-2.0
+
+## Testing
+
+The library includes comprehensive test coverage:
+
+- **Unit tests**: Test configuration, options, and backoff strategies
+- **Integration tests**: Test all queue operations against a real PostgreSQL database
+- **Edge case tests**: Test boundary conditions, error handling, and unusual scenarios
+
+Run tests with:
+
+```bash
+# Unit tests (no database required)
+cargo test --lib
+cargo test --test unit_test
+
+# Integration tests (requires PostgreSQL)
+DATABASE_URL="postgres://user:pass@localhost/db" cargo test --test integration_test -- --ignored
+
+# Edge case tests (requires PostgreSQL)
+DATABASE_URL="postgres://user:pass@localhost/db" cargo test --test edge_cases_test -- --ignored
+```
+
+All tests use isolated queue names to prevent interference between concurrent test runs.
 
 ## Contributing
 
