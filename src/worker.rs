@@ -143,7 +143,7 @@ impl WorkerBuilder {
 
     /// Set the job handler using a pre-boxed function pointer.
     ///
-    /// Use [`handler_fn`] for most cases. This variant accepts the raw [`HandlerFn`] arc
+    /// Use [`Self::handler_fn`] for most cases. This variant accepts the raw [`HandlerFn`] arc
     /// for sharing a handler across multiple workers.
     pub fn handler(mut self, handler: HandlerFn) -> Self {
         self.handler = Some(handler);
