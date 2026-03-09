@@ -2,7 +2,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio_pgqueue::{Job, PgQueue, QueueConfig, WorkerBuilder};
 use tracing::{error, info};

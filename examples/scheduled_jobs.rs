@@ -1,5 +1,4 @@
 use anyhow::Result;
-use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
