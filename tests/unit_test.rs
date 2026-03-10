@@ -39,7 +39,7 @@ fn test_worker_config_builder() {
     let config = WorkerConfig::default();
     assert_eq!(config.poll_interval, StdDuration::from_millis(500));
     assert_eq!(config.heartbeat_interval, StdDuration::from_secs(30));
-    assert_eq!(config.auto_reclaim, true);
+    assert!(config.auto_reclaim);
     assert_eq!(config.reclaim_timeout, StdDuration::from_secs(300));
 }
 
