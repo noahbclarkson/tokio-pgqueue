@@ -1,6 +1,54 @@
-use tokio_pgqueue::{BackoffStrategy, EnqueueOptions, QueueConfig};
+use tokio_pgqueue::{BackoffStrategy, DlqConfig, EnqueueOptions, JobStatus, QueueConfig};
 use chrono::{Duration, Utc};
 use std::time::Duration as StdDuration;
+
+// ---------------------------------------------------------------------------
+// JobStatus tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_job_status_display() {
+    assert_eq!(format!("{}", JobStatus::Pending), "pending");
+    assert_eq!(format!("{}", JobStatus::Running), "running");
+    assert_eq!(format!("{}", JobStatus::Completed), "completed");
+    assert_eq!(format!("{}", JobStatus::Failed), "failed");
+}
+
+#[test]
+fn test_job_status_as_str() {
+    assert_eq!(JobStatus::Pending.as_str(), "pending");
+    assert_eq!(JobStatus::Running.as_str(), "running");
+    assert_eq!(JobStatus::Completed.as_str(), "completed");
+    assert_eq!(JobStatus::Failed.as_str(), "failed");
+}
+
+#[test]
+fn test_job_status_equality() {
+    assert_eq!(JobStatus::Pending, JobStatus::Pending);
+    assert_ne!(JobStatus::Pending, JobStatus::Running);
+    assert_ne!(JobStatus::Completed, JobStatus::Failed);
+}
+
+// ---------------------------------------------------------------------------
+// DlqConfig tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_dlq_config_default() {
+    let config = DlqConfig::default();
+    assert!(config.max_attempts.is_none());
+    assert!(config.preserve_payload);
+}
+
+#[test]
+fn test_dlq_config_with_max_attempts() {
+    let config = DlqConfig {
+        max_attempts: Some(5),
+        preserve_payload: true,
+    };
+    assert_eq!(config.max_attempts, Some(5));
+    assert!(config.preserve_payload);
+}
 
 #[test]
 fn test_enqueue_options_builder() {
